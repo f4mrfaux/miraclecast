@@ -97,8 +97,8 @@ static int cmd_list(char **args, unsigned int n)
 
 	/* list peers */
 
-	cli_command_printf("%6s %-24s %-30s %-10s\n",
-		   "LINK", "PEER-ID", "FRIENDLY-NAME", "CONNECTED");
+	cli_command_printf("%6s %-24s %-30s %-10s %s\n",
+		   "LINK", "PEER-ID", "FRIENDLY-NAME", "CONNECTED", "ADDRESS");
 
 	shl_dlist_for_each(i, &wifi->links) {
 		l = link_from_dlist(i);
@@ -107,12 +107,14 @@ static int cmd_list(char **args, unsigned int n)
 			p = peer_from_dlist(j);
 			++peer_cnt;
 
-			cli_command_printf("%6s %-24s %-30s %-10s\n",
+			cli_command_printf("%6s %-24s %-30s %-10s %s\n",
 					   p->l->label,
 					   p->label,
 					   shl_isempty(p->friendly_name) ?
 					       "<unknown>" : p->friendly_name,
-					   p->connected ? "yes" : "no");
+					   p->connected ? "yes" : "no",
+					   shl_isempty(p->remote_address) ?
+					       "<unknown>" : p->remote_address);
 		}
 	}
 
@@ -411,6 +413,74 @@ static int cmd_quit(char **args, unsigned int n)
  * main
  */
 
+#include "sourcemode.h"
+
+/*
+ * cmd: stream-start
+ */
+
+static int cmd_stream_start(char **args, unsigned int n)
+{
+	struct ctl_peer *p;
+	const char *ip;
+	int port = 0, width = 0, height = 0, fps = 0, bitrate = 0;
+	bool audio = true;
+	unsigned int i;
+
+	if (n < 1) {
+		cli_command_printf("To whom?\n");
+		return 0;
+	}
+
+	if (shl_isempty(args[0])) {
+		p = NULL;
+		ip = args[0]; /* Use IP directly */
+	} else {
+		/* Try to find the peer */
+		p = ctl_wifi_search_peer(wifi, args[0]);
+		if (!p) {
+			cli_error("unknown peer %s (use peer-id or ip-address)", args[0]);
+			return 0;
+		}
+		
+		if (shl_isempty(p->remote_address)) {
+			cli_error("peer %s has no IP address - connect first", p->label);
+			return 0;
+		}
+		
+		ip = p->remote_address;
+	}
+	
+	/* Parse additional options */
+	for (i = 1; i < n; ++i) {
+		if (!strncmp(args[i], "port=", 5)) {
+			port = atoi(&args[i][5]);
+		} else if (!strncmp(args[i], "res=", 4)) {
+			if (sscanf(&args[i][4], "%dx%d", &width, &height) != 2) {
+				cli_error("invalid resolution format - use res=WIDTHxHEIGHT");
+				return 0;
+			}
+		} else if (!strncmp(args[i], "fps=", 4)) {
+			fps = atoi(&args[i][4]);
+		} else if (!strncmp(args[i], "bitrate=", 8)) {
+			bitrate = atoi(&args[i][8]);
+		} else if (!strcmp(args[i], "no-audio")) {
+			audio = false;
+		}
+	}
+	
+	return start_stream(ip, port, width, height, fps, bitrate, audio);
+}
+
+/*
+ * cmd: stream-stop
+ */
+
+static int cmd_stream_stop(char **args, unsigned int n)
+{
+	return stop_stream();
+}
+
 static const struct cli_cmd cli_cmds[] = {
 	{ "list",		NULL,					CLI_M,	CLI_LESS,	0,	cmd_list,		"List all objects", {NULL}},
 	{ "select",		"[link]",				CLI_Y,	CLI_LESS,	1,	cmd_select,		"Select default link", {links_generator, NULL} },
@@ -420,6 +490,8 @@ static const struct cli_cmd cli_cmds[] = {
 	{ "p2p-scan",		"[link] [stop]",			CLI_Y,	CLI_LESS,	2,	cmd_p2p_scan,		"Control neighborhood P2P scanning", {links_generator, NULL} },
 	{ "connect",		"<peer> [provision] [pin]",		CLI_M,	CLI_LESS,	3,	cmd_connect,		"Connect to peer", {peers_generator, NULL} },
 	{ "disconnect",		"<peer>",				CLI_M,	CLI_EQUAL,	1,	cmd_disconnect,		"Disconnect from peer", {peers_generator, NULL} },
+    { "stream-start",	"<peer|ip> [port=PORT] [res=WxH] [fps=N] [bitrate=N] [no-audio]", CLI_M, CLI_LESS, 6, cmd_stream_start, "Start screen streaming to peer or IP", {peers_generator, NULL} },
+    { "stream-stop",	NULL,					CLI_Y,	CLI_EQUAL,	0,	cmd_stream_stop,	"Stop screen streaming", {NULL} },
 	{ "quit",		NULL,					CLI_Y,	CLI_MORE,	0,	cmd_quit,		"Quit program", {NULL} },
 	{ "exit",		NULL,					CLI_Y,	CLI_MORE,	0,	cmd_quit,		NULL , {NULL}},
 	{ "help",		NULL,					CLI_M,	CLI_MORE,	0,	NULL,			"Print help" , {NULL} },
@@ -668,6 +740,10 @@ int main(int argc, char **argv)
 	}
 
 	r = ctl_main(argc, argv);
+	
+	/* Clean up source mode resources */
+	source_cleanup();
+	
 	sd_bus_unref(bus);
 
 	return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;

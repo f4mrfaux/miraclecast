@@ -7,7 +7,7 @@
 
 The MiracleCast project provides software to connect external monitors to your system via Wi-Fi. It is compatible to the Wifi-Display specification also known as Miracast. MiracleCast implements the Display-Source as well as Display-Sink side.
 
-The Display-Source side allows you to connect external displays to your system and stream local content to the device. A lot of effort is put into making this as easy as connecting external displays via HDMI. *Note: This is not implemented yet. Please see [#4](../../issues/4).*
+The Display-Source side allows you to connect external displays to your system and stream local content to the device. A lot of effort is put into making this as easy as connecting external displays via HDMI. The basic functionality for source mode is now implemented, allowing screen casting from your computer to Miracast receivers.
 
 On the other hand, the Display-Sink side allows you to create wifi-capable external displays yourself. You can use it on your embedded devices or even on full desktops to allow other systems to use your device as external display.
 
@@ -109,21 +109,44 @@ If you feel confidence enough (since systemd is the entrypoint for an OS) extrac
 
  6. See your screen device on this machine
 
-### Steps to use it as peer
+### Steps to use it as source (casting your screen)
 
  1. Repeat steps 1 and 2 from "use as sink"
 
- 2. launch wifi control
+ 2. Launch wifi control and scan for peers
 
         $ sudo miracle-wifictl
-
- 3. Enable visibility for other devices
-
- 4. Locate them using scanning
-
+        > select [your-interface]
+        > set-managed yes
         > p2p-scan
+        > list
 
- 5. Apart from list, or show info with peer &lt;mac&gt; there's nothing useful here by now. For a Q&D see [Using as peer](https://github.com/albfan/miraclecast/issues/4)
+ 3. Connect to a peer (Miracast receiver)
+
+        > connect [peer-id]
+
+ 4. Wait for connection, then start streaming your screen
+
+        > stream-start [peer-id] [optional: res=1280x720 fps=30 bitrate=8192]
+
+ 5. To stop streaming
+
+        > stream-stop
+
+### Using the miracle-cast script
+
+A convenience script is provided to simplify the streaming process:
+
+```bash
+# Stream directly to a known IP address
+$ sudo ./res/miracle-cast -t 192.168.1.100
+
+# Stream with custom settings
+$ sudo ./res/miracle-cast -t 192.168.1.100 -r 1280x720 -b 4096 -f 25
+
+# Use specific interface to scan and connect to receivers
+$ sudo ./res/miracle-cast -i wlan0
+```
 
 ## UIBC
 

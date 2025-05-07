@@ -8,6 +8,8 @@ pkg_check_modules (GLIB2 REQUIRED glib-2.0)
 set(miracle-wifictl_SRCS ctl.h 
                          ctl-cli.c 
                          ctl-wifi.c 
+                         sourcemode.h
+                         sourcemode.c
                          wifictl.c)
 
 add_executable(miracle-wifictl ${miracle-wifictl_SRCS})

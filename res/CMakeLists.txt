@@ -1,5 +1,5 @@
 INSTALL(
-    PROGRAMS miracle-gst gstplayer uibc-viewer
+    PROGRAMS miracle-gst gstplayer uibc-viewer miracle-cast
     DESTINATION bin
     )
 

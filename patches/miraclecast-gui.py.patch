@@ -1,0 +1,229 @@
+--- miraclecast-gui.py.orig
++++ miraclecast-gui.py
+@@ -7,6 +7,7 @@
+ import os
+ import subprocess
+ import re
++import signal
+ import time
+ import shlex
+ from PyQt5.QtWidgets import (
+@@ -17,12 +18,14 @@
+ )
+ from PyQt5.QtCore import QProcess, Qt, QTimer
+ from PyQt5.QtGui import QIcon, QFont
++import atexit
+ 
+ class MiracleCastGUI(QMainWindow):
+     """Main application window"""
+     def __init__(self):
+         super().__init__()
+         self.processes = {}
++        self.exit_handlers = []
+         self.interfaces = []
+         self.mirror_commands = []
+         self.universal_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "miraclecast-universal.sh")
+@@ -34,6 +37,9 @@
+         self.setWindowTitle("MiracleCast Controller")
+         self.setGeometry(100, 100, 900, 650)
+ 
++        # Set up clean exit handler
++        atexit.register(self.cleanup_on_exit)
++
+         try:
+             self.setWindowIcon(QIcon.fromTheme("video-display"))
+         except Exception:
+@@ -428,16 +434,29 @@
+             # Add resolution if set
+             width = self.source_res_width.text().strip()
+             height = self.source_res_height.text().strip()
+-            if width and height and width.isdigit() and height.isdigit():
+-                cmd.extend(["-r", f"{width}x{height}"])
++            if width and height:
++                # Validate resolution values
++                if not width.isdigit() or not height.isdigit():
++                    self.show_error("Resolution must be numeric values")
++                    return None
++                if int(width) < 320 or int(width) > 3840 or int(height) < 240 or int(height) > 2160:
++                    self.show_error("Resolution values out of range (width: 320-3840, height: 240-2160)")
++                    return None
++                cmd.extend(["-r", f"{width}x{height}"])
+                 
+             # Add FPS if set
+             fps = self.source_fps.text().strip()
+-            if fps and fps.isdigit():
++            if fps:
++                if not fps.isdigit() or int(fps) < 10 or int(fps) > 60:
++                    self.show_error("FPS must be a number between 10 and 60")
++                    return None
+                 cmd.extend(["-f", fps])
+                 
+             # Add bitrate if set
+             bitrate = self.source_bitrate.text().strip()
+-            if bitrate and bitrate.isdigit():
++            if bitrate:
++                if not bitrate.isdigit() or int(bitrate) < 1000 or int(bitrate) > 20000:
++                    self.show_error("Bitrate must be a number between 1000 and 20000 kbps")
++                    return None
+                 cmd.extend(["-b", bitrate])
+                 
+             # Add hardware fix option
+@@ -448,7 +467,7 @@
+             if not self.source_session_check.isChecked():
+                 cmd.append("-s")
+         
+-        return cmd
++        return cmd
+             
+     def start_sink_service(self):
+         """Start sink mode using universal script"""
+@@ -459,14 +478,19 @@
+ 
+         # Build command with options
+         cmd = self.build_universal_cmd("sink")
++        if not cmd:  # Validation failed
++            return
++            
+         self.run_command(cmd, 'sink')
+         self.sink_status_label.setText("Running")
+         self.log(f"Started sink mode with universal script on {iface}")
+             
+     def stop_sink_service(self):
+         """Stop sink service"""
+-        if 'sink' in self.processes:
+-            self.processes['sink'].terminate()
++        if 'sink' in self.processes and self.processes['sink'].state() != QProcess.NotRunning:
++            self.log("Gracefully terminating sink process...")
++            self.processes['sink'].terminate()
++            self.processes['sink'].waitForFinished(3000)  # Wait up to 3 seconds
+             self.sink_status_label.setText("Not Running")
+             self.log("Stopped sink service")
+             
+@@ -479,14 +503,19 @@
+ 
+         # Build command with options
+         cmd = self.build_universal_cmd("source")
++        if not cmd:  # Validation failed
++            return
++            
+         self.run_command(cmd, 'source')
+         self.source_status_label.setText("Running")
+         self.log(f"Started source mode with universal script on {iface}")
+             
+     def stop_source_service(self):
+         """Stop source service"""
+-        if 'source' in self.processes:
+-            self.processes['source'].terminate()
++        if 'source' in self.processes and self.processes['source'].state() != QProcess.NotRunning:
++            self.log("Gracefully terminating source process...")
++            self.processes['source'].terminate()
++            self.processes['source'].waitForFinished(3000)  # Wait up to 3 seconds
+             self.source_status_label.setText("Not Running")
+             self.log("Stopped source service")
+             
+@@ -494,9 +523,15 @@
+         """Run a command using QProcess"""
+         if process_name in self.processes:
+             # Stop existing process
+-            self.processes[process_name].terminate()
+-            self.processes[process_name].waitForFinished(1000)
+-            
++            old_process = self.processes[process_name]
++            if old_process.state() != QProcess.NotRunning:
++                self.log(f"Terminating existing {process_name} process...")
++                old_process.terminate()
++                if not old_process.waitForFinished(3000):  # Wait up to 3 seconds
++                    self.log(f"Process didn't terminate, forcing kill...")
++                    old_process.kill()
++                    old_process.waitForFinished(1000)
++                
+         # Log the command to be executed
+         self.log(f"Running: {' '.join(cmd)}")
+             
+@@ -508,11 +543,35 @@
+         process.readyReadStandardOutput.connect(
+             lambda: self.process_output(process, process_name, False))
+         process.readyReadStandardError.connect(
+-            lambda: self.process_output(process, process_name, True))
++            lambda: self.process_output(process, process_name, True))
++        process.finished.connect(
++            lambda exit_code, exit_status: self.handle_process_finished(process_name, exit_code, exit_status))
+         
+         # Start process
+-        process.start(cmd[0], cmd[1:])
++        try:
++            process.start(cmd[0], cmd[1:])
++            # Register exit handler for this process
++            self.exit_handlers.append(process_name)
++        except Exception as e:
++            self.log(f"Error starting process: {str(e)}", error=True)
++            self.show_error(f"Failed to start process: {str(e)}")
+         
++    def handle_process_finished(self, process_name, exit_code, exit_status):
++        """Handle process termination"""
++        if exit_code != 0:
++            self.log(f"Process {process_name} terminated with exit code {exit_code}", error=True)
++            if process_name == 'sink':
++                self.sink_status_label.setText("Error: Process terminated")
++            elif process_name == 'source':
++                self.source_status_label.setText("Error: Process terminated")
++        else:
++            self.log(f"Process {process_name} completed successfully")
++            if process_name == 'sink':
++                self.sink_status_label.setText("Not Running")
++            elif process_name == 'source':
++                self.source_status_label.setText("Not Running")
++        
++        # Remove from exit handlers if present
++        if process_name in self.exit_handlers:
++            self.exit_handlers.remove(process_name)
++            
+     def process_output(self, process, name, is_error):
+         """Handle process output"""
+         if is_error:
+@@ -524,18 +583,39 @@
+             
+     def manage_service(self, service_name, start=True):
+         """Manage system services"""
+-        action = "start" if start else "stop"
++        action = "start" if start else "stop"
++        
++        # Validate service name to prevent command injection
++        if not re.match(r'^[a-zA-Z0-9_.-]+$', service_name):
++            self.show_error(f"Invalid service name: {service_name}")
++            return
++            
+         try:
+-            result = subprocess.run(['sudo', 'systemctl', action, service_name], 
+-                                   capture_output=True, text=True)
++            # Use a more secure approach with check=True to catch errors
++            result = subprocess.run(
++                ['sudo', 'systemctl', action, service_name],
++                capture_output=True, 
++                text=True,
++                check=False  # Don't raise exception, handle manually
++            )
++            
+             if result.returncode == 0:
+                 self.log(f"{service_name} {action}ed successfully")
+                 self.check_services_status()
+             else:
+                 error_msg = result.stderr.strip() or f"Failed to {action} {service_name}"
+-                self.show_error(error_msg)
++                self.show_error(f"Error: {error_msg}")
+                 self.log(error_msg, error=True)
+         except Exception as e:
+-            self.show_error(f"Error: {str(e)}")
++            self.show_error(f"Error managing service: {str(e)}")
+             self.log(str(e), error=True)
++            
++    def cleanup_on_exit(self):
++        """Clean up all processes when application exits"""
++        for name in list(self.processes.keys()):
++            process = self.processes[name]
++            if process.state() != QProcess.NotRunning:
++                self.log(f"Cleaning up {name} process on exit")
++                process.terminate()
++                process.waitForFinished(1000)  # Give it a second to terminate gracefully
+ 
+ 

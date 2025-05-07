@@ -1,0 +1,194 @@
+#!/bin/bash
+# Enhanced UIBC (User Input Back Channel) Viewer for MiracleCast
+# Provides extended input event support beyond basic mouse and keyboard
+
+# Parse command line arguments
+if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 <host> <port>"
+    exit 1
+fi
+
+HOST="$1"
+PORT="$2"
+
+# Check if Xdotool is available
+if ! command -v xdotool &> /dev/null; then
+    echo "xdotool is required but not installed. Please install it."
+    echo "On Debian/Ubuntu: sudo apt-get install xdotool"
+    echo "On Fedora: sudo dnf install xdotool"
+    echo "On Arch: sudo pacman -S xdotool"
+    exit 1
+fi
+
+# Check if miracle-uibcctl is available
+if ! command -v miracle-uibcctl &> /dev/null; then
+    echo "miracle-uibcctl is required but not installed. Please ensure MiracleCast is properly installed."
+    exit 1
+fi
+
+# Check if we have display access
+if [ -z "$DISPLAY" ]; then
+    echo "No display detected. UIBC requires X11."
+    exit 1
+fi
+
+# Set up temp files for tracking state
+MOUSE_STATE_FILE="$(mktemp -t miraclecast-uibc-mouse-XXXXXX)"
+KEYBOARD_STATE_FILE="$(mktemp -t miraclecast-uibc-keyboard-XXXXXX)"
+GESTURE_STATE_FILE="$(mktemp -t miraclecast-uibc-gesture-XXXXXX)"
+
+# Clean up on exit
+function cleanup() {
+    rm -f "$MOUSE_STATE_FILE" "$KEYBOARD_STATE_FILE" "$GESTURE_STATE_FILE"
+    kill $(jobs -p) 2>/dev/null
+}
+trap cleanup EXIT
+
+# Initialize state files
+echo "0,0" > "$MOUSE_STATE_FILE"  # x,y coordinates
+echo "0" > "$KEYBOARD_STATE_FILE"  # last key state
+echo "0,0,0" > "$GESTURE_STATE_FILE"  # gesture_type,x,y
+
+# Function to parse and handle mouse events
+function handle_mouse_event() {
+    local event="$1"
+    local event_type=$(echo "$event" | cut -d',' -f1)
+    local x=$(echo "$event" | cut -d',' -f2)
+    local y=$(echo "$event" | cut -d',' -f3)
+    local buttons=$(echo "$event" | cut -d',' -f4)
+    
+    # Update mouse position
+    echo "$x,$y" > "$MOUSE_STATE_FILE"
+    
+    case "$event_type" in
+        "move")
+            xdotool mousemove $x $y
+            ;;
+        "down")
+            xdotool mousemove $x $y mousedown $buttons
+            ;;
+        "up")
+            xdotool mousemove $x $y mouseup $buttons
+            ;;
+        "scroll")
+            # Calculate scroll direction and amount
+            local direction="up"
+            local amount=1
+            if [ "$buttons" -lt 0 ]; then
+                direction="down"
+                amount=$((-buttons))
+            else
+                amount=$buttons
+            fi
+            
+            xdotool mousemove $x $y click --repeat $amount $direction
+            ;;
+    esac
+}
+
+# Function to parse and handle keyboard events
+function handle_keyboard_event() {
+    local event="$1"
+    local key_code=$(echo "$event" | cut -d',' -f1)
+    local key_state=$(echo "$event" | cut -d',' -f2)
+    
+    # Update key state
+    echo "$key_state" > "$KEYBOARD_STATE_FILE"
+    
+    # Convert key code to xdotool format
+    # This is a simplification; a full implementation would map all key codes
+    
+    case "$key_state" in
+        "down")
+            xdotool keydown $key_code
+            ;;
+        "up")
+            xdotool keyup $key_code
+            ;;
+    esac
+}
+
+# Function to handle multi-touch gestures
+function handle_gesture_event() {
+    local event="$1"
+    local gesture_type=$(echo "$event" | cut -d',' -f1)
+    local x=$(echo "$event" | cut -d',' -f2)
+    local y=$(echo "$event" | cut -d',' -f3)
+    local data=$(echo "$event" | cut -d',' -f4)
+    
+    # Update gesture state
+    echo "$gesture_type,$x,$y" > "$GESTURE_STATE_FILE"
+    
+    case "$gesture_type" in
+        "pinch")
+            # Handle pinch to zoom
+            if [ "$data" -gt 0 ]; then
+                # Zoom in
+                xdotool key ctrl+plus
+            else
+                # Zoom out
+                xdotool key ctrl+minus
+            fi
+            ;;
+        "rotate")
+            # Handle rotate gesture
+            # This is just an example - adjust based on your application needs
+            if [ "$data" -gt 0 ]; then
+                # Rotate clockwise
+                xdotool key ctrl+r
+            else
+                # Rotate counter-clockwise
+                xdotool key ctrl+shift+r
+            fi
+            ;;
+        "swipe")
+            # Handle swipe gestures
+            case "$data" in
+                "left")
+                    xdotool key Alt+Right
+                    ;;
+                "right")
+                    xdotool key Alt+Left
+                    ;;
+                "up")
+                    xdotool key Page_Up
+                    ;;
+                "down")
+                    xdotool key Page_Down
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+# Main function to process UIBC events
+function process_uibc_events() {
+    while read -r event; do
+        # Parse event type
+        event_type=$(echo "$event" | cut -d':' -f1)
+        event_data=$(echo "$event" | cut -d':' -f2-)
+        
+        case "$event_type" in
+            "MOUSE")
+                handle_mouse_event "$event_data"
+                ;;
+            "KEY")
+                handle_keyboard_event "$event_data"
+                ;;
+            "GESTURE")
+                handle_gesture_event "$event_data"
+                ;;
+            *)
+                # Unknown event type
+                echo "Unknown event type: $event_type"
+                ;;
+        esac
+    done
+}
+
+# Start the enhanced UIBC viewer with extended capabilities
+echo "Starting Enhanced UIBC viewer connecting to $HOST:$PORT"
+echo "Supporting mouse, keyboard, and gesture input"
+
+# Start miracle-uibcctl and pipe events to our processor
+miracle-uibcctl "$HOST" "$PORT" | process_uibc_events

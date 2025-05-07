@@ -1,0 +1,118 @@
+--- miraclecast-universal.sh.orig
++++ miraclecast-universal.sh
+@@ -3,7 +3,7 @@
+ # Provides an integrated launcher with all improvements to address limitations
+ 
+ # Import utility functions
+-. ./res/miracle-utils.sh
++. "$(dirname "$0")/res/miracle-utils.sh"
+ 
+ # Colors
+ RED='\033[0;31m'
+@@ -87,7 +87,10 @@
+         b)
+             BITRATE="$OPTARG"
+             if ! [[ $BITRATE =~ ^[0-9]+$ ]]; then
+-                echo -e "${RED}Invalid bitrate: $BITRATE. Must be a number.${NC}"
++                echo -e "${RED}Invalid bitrate: ${OPTARG}. Must be a number.${NC}"
++                exit 1
++            elif [ "$BITRATE" -lt 1000 ] || [ "$BITRATE" -gt 20000 ]; then
++                echo -e "${RED}Invalid bitrate: ${OPTARG}. Must be between 1000 and 20000.${NC}"
+                 exit 1
+             fi
+             ;;
+@@ -127,7 +130,7 @@
+     WIFI_NAMES="$(find_wireless_network_interfaces)"
+     WIFI_COUNT=$(echo "$WIFI_NAMES" | wc -l)
+     
+-    if [ "$WIFI_COUNT" -eq 0 ]; then
++    if [ -z "$WIFI_NAMES" ] || [ "$WIFI_COUNT" -eq 0 ]; then
+         echo -e "${RED}No wireless interfaces found.${NC}"
+         exit 1
+     fi
+@@ -140,9 +143,11 @@
+     done
+     
+     echo
+-    read -p "Select interface number [1-$WIFI_COUNT]: " SELECTION
++    read -p "Select interface number [1-$WIFI_COUNT]: " SELECTION < /dev/tty
+     
+-    if ! [[ $SELECTION =~ ^[0-9]+$ ]] || [ "$SELECTION" -lt 1 ] || [ "$SELECTION" -gt "$WIFI_COUNT" ]; then
++    # Validate user input
++    SELECTION=$(echo "$SELECTION" | tr -cd '[:digit:]')
++    if [ -z "$SELECTION" ] || [ "$SELECTION" -lt 1 ] || [ "$SELECTION" -gt "$WIFI_COUNT" ]; then
+         echo -e "${RED}Invalid selection.${NC}"
+         exit 1
+     fi
+@@ -165,8 +170,12 @@
+     fi
+     
+     # Run basic hardware fixes
+-    if [ -f "./res/hardware-compatibility-fixer.sh" ]; then
+-        ./res/hardware-compatibility-fixer.sh
++    FIXER_SCRIPT="$(dirname "$0")/res/hardware-compatibility-fixer.sh"
++    if [ -f "$FIXER_SCRIPT" ]; then
++        if [ -x "$FIXER_SCRIPT" ]; then
++            "$FIXER_SCRIPT"
++        else
++            echo -e "${YELLOW}Hardware compatibility fixer exists but is not executable. Skipping.${NC}"
+     else
+         echo -e "${YELLOW}Hardware compatibility fixer not found.${NC}"
+     fi
+@@ -181,9 +190,11 @@
+ 
+ # Prepare network interface using session manager or traditional method
+ if [ "$SESSION_MANAGED" = true ]; then
+-    echo -e "${BLUE}Using session-based network management${NC}"
+-    if [ -f "./res/network-session-manager.sh" ]; then
+-        ./res/network-session-manager.sh prepare "$INTERFACE"
++    NETWORK_MANAGER="$(dirname "$0")/res/network-session-manager.sh"
++    echo -e "${BLUE}Using session-based network management ($NETWORK_MANAGER)${NC}"
++    if [ -f "$NETWORK_MANAGER" ] && [ -x "$NETWORK_MANAGER" ]; then
++        "$NETWORK_MANAGER" prepare "$INTERFACE" || { echo -e "${RED}Failed to prepare network interface${NC}"; exit 1; }
++        echo -e "${GREEN}Network interface prepared successfully${NC}"
+     else
+         echo -e "${YELLOW}Network session manager not found, falling back to traditional method${NC}"
+         kill_network_manager
+@@ -214,8 +225,12 @@
+     fi
+     
+     # Restore network if using session management
+-    if [ "$SESSION_MANAGED" = true ] && [ -f "./res/network-session-manager.sh" ]; then
+-        ./res/network-session-manager.sh restore
++    NETWORK_MANAGER="$(dirname "$0")/res/network-session-manager.sh"
++    if [ "$SESSION_MANAGED" = true ] && [ -f "$NETWORK_MANAGER" ] && [ -x "$NETWORK_MANAGER" ]; then
++        "$NETWORK_MANAGER" restore || { 
++            echo -e "${RED}Failed to restore network interface, attempting fallback method${NC}"
++            start_network_manager
++        }
+     else
+         # Traditional network restoration
+         echo "Restoring network services..."
+@@ -230,7 +245,10 @@
+ 
+ # Start MiracleCast WiFi daemon
+ echo -e "${BLUE}Starting MiracleCast WiFi daemon...${NC}"
+-miracle-wifid -i "$INTERFACE" &
++if ! command -v miracle-wifid &> /dev/null; then
++    echo -e "${RED}miracle-wifid command not found. Please ensure MiracleCast is properly installed.${NC}"
++    exit 1
++fi
+ WIFID_PID=$!
+ sleep 2
+ 
+@@ -247,8 +265,12 @@
+     fi
+     if [ "$FIX_GREEN_SCREEN" = true ]; then
+         echo "Using improved GStreamer player with green screen fix"
+-        cp ./res/miracle-gst-improved /tmp/miracle-gst
+-        chmod +x /tmp/miracle-gst
++        GST_IMPROVED="$(dirname "$0")/res/miracle-gst-improved"
++        if [ -f "$GST_IMPROVED" ] && [ -r "$GST_IMPROVED" ]; then
++            cp "$GST_IMPROVED" /tmp/miracle-gst
++            chmod +x /tmp/miracle-gst
++            echo -e "${GREEN}Installed improved GStreamer player${NC}"
++        fi
+         export PATH="/tmp:$PATH"
+     fi
+     

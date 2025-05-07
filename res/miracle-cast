@@ -1,0 +1,155 @@
+#!/bin/bash
+
+function help {
+   local scriptname="$(basename $0)"
+   cat >&2 <<EOF
+
+$scriptname [options]
+
+Cast screen to a Miracast receiver
+
+Options:
+   -i <interface>     Network interface to use
+   -t <target>        Target IP address (if already known)
+   -p <port>          Port for stream (default: 8554)
+   -r <WxH>           Resolution (default: auto)
+   -b <bitrate>       Bitrate in kbps (default: 8192)
+   -f <fps>           Frames per second (default: 30)
+   -n                 No audio
+   -d <level>         Debug level
+   -h                 Show this help
+
+Examples:
+
+ # Cast to a specific IP address
+ $ $scriptname -t 192.168.1.100
+
+ # Cast to a specific IP with custom settings
+ $ $scriptname -t 192.168.1.100 -r 1280x720 -b 4096 -f 25
+
+ # Use specific interface to scan for and connect to receivers
+ $ $scriptname -i wlan0
+
+EOF
+}
+
+# Default settings
+INTERFACE=""
+TARGET=""
+PORT="8554"
+RES=""
+BITRATE="8192"
+FPS="30"
+AUDIO="yes"
+DEBUG="0"
+
+while getopts "i:t:p:r:b:f:nd:h" optname
+  do
+    case "$optname" in
+      "h")
+        help
+        exit 0
+        ;;
+      "i")
+        INTERFACE="${OPTARG}"
+        ;;
+      "t")
+        TARGET="${OPTARG}"
+        ;;
+      "p")
+        PORT="${OPTARG}"
+        ;;
+      "r")
+        RES="${OPTARG}"
+        ;;
+      "b")
+        BITRATE="${OPTARG}"
+        ;;
+      "f")
+        FPS="${OPTARG}"
+        ;;
+      "n")
+        AUDIO="no"
+        ;;
+      "d")
+        DEBUG="${OPTARG}"
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        help
+        exit 1
+        ;;
+      *)
+        echo "Unknown parameter $OPTARG"
+        help
+        exit 1
+        ;;
+    esac
+  done
+
+# Check if we're running as root
+if [ "$EUID" -ne 0 ]; then
+  echo "This script must be run as root" 
+  exit 1
+fi
+
+# If a direct target IP is provided, connect directly
+if [ ! -z "$TARGET" ]; then
+  echo "Streaming directly to $TARGET:$PORT"
+  
+  # Build streaming options
+  STREAM_OPTS="port=$PORT"
+  
+  if [ ! -z "$RES" ]; then
+    STREAM_OPTS="$STREAM_OPTS res=$RES"
+  fi
+  
+  if [ ! -z "$FPS" ]; then
+    STREAM_OPTS="$STREAM_OPTS fps=$FPS"
+  fi
+  
+  if [ ! -z "$BITRATE" ]; then
+    STREAM_OPTS="$STREAM_OPTS bitrate=$BITRATE"
+  fi
+  
+  if [ "$AUDIO" = "no" ]; then
+    STREAM_OPTS="$STREAM_OPTS no-audio"
+  fi
+  
+  echo "miracle-wifictl stream-start $TARGET $STREAM_OPTS"
+  exec miracle-wifictl stream-start $TARGET $STREAM_OPTS
+  exit 0
+fi
+
+# Otherwise, use the interactive mode to scan for devices
+if [ -z "$INTERFACE" ]; then
+  echo "No interface specified. Available interfaces:"
+  ip link show | grep -v "lo:" | grep "state UP" | awk -F': ' '{print $2}'
+  echo ""
+  echo "Please specify an interface with -i option"
+  exit 1
+fi
+
+# Set up the WiFi interface for P2P
+echo "Setting up interface $INTERFACE for P2P scanning"
+
+cat > /tmp/miracle-cast-commands.txt << EOF
+select $INTERFACE
+set-managed yes
+p2p-scan
+list
+EOF
+
+echo "Starting MiracleCast in interactive mode"
+echo "Commands available:"
+echo "  - list               : List available devices"
+echo "  - connect <peer>     : Connect to peer"
+echo "  - stream-start <peer>: Start streaming to peer"
+echo "  - stream-stop        : Stop streaming"
+echo "  - exit               : Exit"
+
+# Start miracle-wifictl with the initial commands
+cat /tmp/miracle-cast-commands.txt | miracle-wifictl
+
+# Clean up
+rm -f /tmp/miracle-cast-commands.txt

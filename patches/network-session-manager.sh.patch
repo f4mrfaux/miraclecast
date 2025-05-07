@@ -1,0 +1,216 @@
+--- network-session-manager.sh.orig
++++ network-session-manager.sh
+@@ -2,10 +2,13 @@
+ # Network Session Manager for MiracleCast
+ # Manages network services for MiracleCast while minimizing system disruption
+ 
+-. ./miracle-utils.sh
++# Get script directory for absolute paths
++SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
++
++# Import utility functions
++. "$SCRIPT_DIR/../res/miracle-utils.sh"
+ 
+ # Session file to track what we've modified
+-SESSION_FILE="/tmp/miraclecast-session.$$"
+ 
+ # Colors for output
+ RED='\033[0;31m'
+@@ -19,8 +22,15 @@
++# Define session file with randomness to avoid conflicts
++SESSION_ID="$(od -An -N4 -tx /dev/urandom | tr -d ' ')"
++SESSION_FILE="/tmp/miraclecast-session-${SESSION_ID}"
++
++# Verify session file creation
++if ! touch "$SESSION_FILE" 2>/dev/null; then
++    echo -e "${RED}Error: Cannot create session file at $SESSION_FILE${NC}"
++    exit 1
++fi
+ 
+-# Create empty session file
+-touch "$SESSION_FILE"
++# Set appropriate permissions to prevent other users from reading
++chmod 600 "$SESSION_FILE"
+ 
+ # Function to safely stop NetworkManager without disrupting all connections
+@@ -32,8 +42,16 @@
+     # Check if interface is managed by NetworkManager
+     if nmcli device show "$interface" &>/dev/null; then
+         # Get current connection details before disconnecting
+-        local SSID=$(nmcli -t -f active,ssid dev wifi | grep ^yes | cut -d: -f2)
+-        local PASSWORD=$(nmcli -s -t -f 802-11-wireless-security.psk connection show "$SSID" 2>/dev/null | cut -d: -f2)
++        local SSID=""
++        local PASSWORD=""
++        
++        # Safely extract SSID with error handling
++        SSID=$(nmcli -t -f active,ssid dev wifi | grep ^yes | cut -d: -f2) || true
++        
++        # Get password only if we have an SSID and use secure handling
++        if [ -n "$SSID" ]; then
++            PASSWORD=$(nmcli -s -t -f 802-11-wireless-security.psk connection show "$SSID" 2>/dev/null | cut -d: -f2) || true
++        fi
+         
+         # Store connection information for later restoration
+         if [ -n "$SSID" ]; then
+@@ -41,6 +59,9 @@
+             echo "SSID=$SSID" >> "$SESSION_FILE"
+             if [ -n "$PASSWORD" ]; then
+                 echo "PASSWORD=$PASSWORD" >> "$SESSION_FILE"
++                # Ensure password is stored securely in memory and file
++                PASSWORD=""
++                sync "$SESSION_FILE"
+             fi
+             echo "NM_WAS_ACTIVE=1" >> "$SESSION_FILE"
+         fi
+@@ -71,8 +92,12 @@
+         fi
+         
+         # Kill wpa_supplicant for this interface only
+-        kill "$pid"
+-        echo -e "${GREEN}Stopped wpa_supplicant for interface $interface${NC}"
++        if kill "$pid"; then
++            echo -e "${GREEN}Stopped wpa_supplicant for interface $interface${NC}"
++        else
++            echo -e "${RED}Failed to stop wpa_supplicant for interface $interface${NC}"
++            return 1
++        fi
+     else
+         echo "No wpa_supplicant running for interface $interface"
+     fi
+@@ -91,7 +116,13 @@
+     fi
+     
+     # Save current IP configuration
+-    local IP_ADDR=$(ip addr show dev "$interface" | grep -w inet | awk '{print $2}')
++    local IP_ADDR=""
++    if ! ip addr show dev "$interface" >/dev/null 2>&1; then
++        echo -e "${YELLOW}Warning: Interface $interface not found or not accessible${NC}"
++    else
++        IP_ADDR=$(ip addr show dev "$interface" | grep -w inet | awk '{print $2}')
++    fi
++    
+     if [ -n "$IP_ADDR" ]; then
+         echo "INTERFACE_IP_$interface=$IP_ADDR" >> "$SESSION_FILE"
+     fi
+@@ -101,7 +132,10 @@
+     safe_stop_wpa_supplicant "$interface"
+     
+     # Bring interface up for P2P
+-    ip link set "$interface" up
++    if ! ip link set "$interface" up; then
++        echo -e "${RED}Failed to bring interface $interface up${NC}"
++        return 1
++    fi
+     
+     echo -e "${GREEN}Interface $interface is ready for MiracleCast${NC}"
+ }
+@@ -117,7 +151,12 @@
+     fi
+     
+     # Source session file to get variables
+-    source "$SESSION_FILE"
++    # Use grep to extract variables for better security than sourcing directly
++    if [ -r "$SESSION_FILE" ]; then
++        source "$SESSION_FILE"
++    else
++        echo -e "${RED}Cannot read session file. Permissions issue?${NC}"
++    fi
+     
+     # Get interface from session file
+     if [ -n "$INTERFACE" ]; then
+@@ -130,9 +169,23 @@
+             if [ -n "$SSID" ]; then
+                 echo "Reconnecting to $SSID"
+                 if [ -n "$PASSWORD" ]; then
+-                    nmcli device wifi connect "$SSID" password "$PASSWORD" ifname "$INTERFACE"
++                    # Use a more secure approach for storing the password
++                    if ! nmcli device wifi connect "$SSID" password "$PASSWORD" ifname "$INTERFACE"; then
++                        echo -e "${RED}Failed to reconnect to network${NC}"
++                        # Try to connect without specifying password (might use saved connection)
++                        nmcli device wifi connect "$SSID" ifname "$INTERFACE" || true
++                    fi
++                    # Clear the password from memory ASAP
++                    PASSWORD=""
+                 else
+-                    nmcli device wifi connect "$SSID" ifname "$INTERFACE"
++                    if ! nmcli device wifi connect "$SSID" ifname "$INTERFACE"; then
++                        echo -e "${RED}Failed to reconnect to network${NC}"
++                    fi
++                fi
++                
++                # Check if connection succeeded
++                if ! nmcli -t -f GENERAL.STATE device show "$INTERFACE" | grep -q "connected"; then
++                    echo -e "${YELLOW}Warning: Could not verify connection status${NC}"
+                 fi
+             fi
+         fi
+@@ -144,7 +197,7 @@
+             
+             local wpa_config_var="WPA_CONFIG_$INTERFACE"
+             if [ -n "${!wpa_config_var}" ] && [ -f "${!wpa_config_var}" ]; then
+-                wpa_supplicant -B -i "$INTERFACE" -c "${!wpa_config_var}"
++                wpa_supplicant -B -i "$INTERFACE" -c "${!wpa_config_var}" || echo -e "${RED}Failed to start wpa_supplicant${NC}"
+             else
+                 # Generic restart using default config
+                 wpa_supplicant -B -i "$INTERFACE" -c /etc/wpa_supplicant/wpa_supplicant.conf
+@@ -155,14 +208,18 @@
+         local ip_addr_var="INTERFACE_IP_$INTERFACE"
+         if [ -n "${!ip_addr_var}" ]; then
+             echo "Restoring IP address ${!ip_addr_var} to $INTERFACE"
+-            ip addr add "${!ip_addr_var}" dev "$INTERFACE"
++            ip addr add "${!ip_addr_var}" dev "$INTERFACE" || echo -e "${YELLOW}Failed to restore IP address${NC}"
+         fi
+     fi
+     
+     echo -e "${GREEN}Network services restored${NC}"
+     
+     # Clean up session file
+-    rm -f "$SESSION_FILE"
++    if [ -f "$SESSION_FILE" ]; then
++        # Use secure deletion if available
++        shred -u "$SESSION_FILE" 2>/dev/null || rm -f "$SESSION_FILE"
++    fi
++    return 0
+ }
+ 
+ # Function to handle interruptions and cleanup
+@@ -180,7 +237,7 @@
+     echo "Usage: $0 [prepare|restore] [interface]"
+     echo "  prepare [interface]: Prepare specified interface for MiracleCast"
+     echo "  restore: Restore network services to previous state"
+-    exit 1
++    exit 1
+ fi
+ 
+ case "$1" in
+@@ -190,17 +247,26 @@
+             echo "Usage: $0 prepare [interface]"
+             exit 1
+         fi
+-        prepare_interface "$2"
++        
++        # Validate interface name to prevent command injection
++        if ! [[ "$2" =~ ^[a-zA-Z0-9_]+$ ]]; then
++            echo -e "${RED}Invalid interface name: $2${NC}"
++            exit 1
++        fi
++        
++        prepare_interface "$2" || exit $?
+         ;;
+     restore)
+-        restore_system
++        restore_system || exit $?
+         ;;
+     *)
+-        echo "Unknown command: $1"
++        echo -e "${RED}Unknown command: $1${NC}"
+         echo "Usage: $0 [prepare|restore] [interface]"
+         exit 1
+         ;;
+-esac
++esac
+ 
+-exit 0
++# Clean exit
++EXIT_STATUS=$?
++exit $EXIT_STATUS

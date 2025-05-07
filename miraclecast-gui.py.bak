@@ -1,0 +1,620 @@
+#!/usr/bin/env python3
+"""
+MiracleCast GUI - A user-friendly interface for WiFi Display functionality
+"""
+
+import sys
+import os
+import subprocess
+import re
+import time
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
+    QTabWidget, QTextEdit, QLabel, QComboBox, QMessageBox,
+    QGroupBox, QGridLayout, QCheckBox, QHBoxLayout,
+    QListWidget, QListWidgetItem
+)
+from PyQt5.QtCore import QProcess, Qt, QTimer
+from PyQt5.QtGui import QIcon, QFont
+
+class MiracleCastGUI(QMainWindow):
+    """Main application window"""
+    def __init__(self):
+        super().__init__()
+        self.processes = {}
+        self.interfaces = []
+        self.mirror_commands = []
+        self.init_ui()
+        QTimer.singleShot(100, self.check_dependencies)
+
+    def init_ui(self):
+        """Initialize user interface"""
+        self.setWindowTitle("MiracleCast Controller")
+        self.setGeometry(100, 100, 900, 650)
+
+        try:
+            self.setWindowIcon(QIcon.fromTheme("video-display"))
+        except Exception:
+            pass
+
+        main_widget = QWidget()
+        layout = QVBoxLayout()
+
+        # Tab widget
+        tabs = QTabWidget()
+        self.sink_tab = self.create_sink_tab()
+        self.source_tab = self.create_source_tab()
+        self.setup_tab = self.create_setup_tab()
+
+        tabs.addTab(self.sink_tab, "Receive Display (Sink)")
+        tabs.addTab(self.source_tab, "Send Display (Source)")
+        tabs.addTab(self.setup_tab, "Setup")
+
+        # Console output
+        console_group = QGroupBox("Console Output")
+        console_layout = QVBoxLayout()
+        self.console = QTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setFont(QFont("Monospace", 10))
+        console_layout.addWidget(self.console)
+
+        clear_btn = QPushButton("Clear Console")
+        clear_btn.clicked.connect(self.console.clear)
+        console_layout.addWidget(clear_btn)
+        console_group.setLayout(console_layout)
+
+        # Main layout assembly
+        layout.addWidget(tabs)
+        layout.addWidget(console_group)
+        main_widget.setLayout(layout)
+        self.setCentralWidget(main_widget)
+
+    def create_sink_tab(self):
+        """Create sink control tab"""
+        tab = QWidget()
+        layout = QVBoxLayout()
+
+        # Interface selection
+        iface_group = QGroupBox("Network Interface")
+        iface_layout = QHBoxLayout()
+        self.iface_combo = QComboBox()
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self.refresh_interfaces)
+        iface_layout.addWidget(QLabel("Select Interface:"))
+        iface_layout.addWidget(self.iface_combo)
+        iface_layout.addWidget(refresh_btn)
+        iface_group.setLayout(iface_layout)
+
+        # WiFi daemon controls
+        wifi_group = QGroupBox("WiFi P2P Daemon")
+        wifi_layout = QHBoxLayout()
+        self.start_wifi_btn = QPushButton("Start WiFi Daemon")
+        self.start_wifi_btn.clicked.connect(self.start_wifi_daemon)
+        self.stop_wifi_btn = QPushButton("Stop WiFi Daemon")
+        self.stop_wifi_btn.clicked.connect(self.stop_wifi_daemon)
+        wifi_layout.addWidget(self.start_wifi_btn)
+        wifi_layout.addWidget(self.stop_wifi_btn)
+        wifi_group.setLayout(wifi_layout)
+
+        # Sink controls
+        sink_group = QGroupBox("Sink Service")
+        sink_layout = QVBoxLayout()
+        btn_layout = QHBoxLayout()
+        self.start_sink_btn = QPushButton("Start Sink Service")
+        self.start_sink_btn.clicked.connect(self.start_sink_service)
+        self.stop_sink_btn = QPushButton("Stop Sink Service")
+        self.stop_sink_btn.clicked.connect(self.stop_sink_service)
+        btn_layout.addWidget(self.start_sink_btn)
+        btn_layout.addWidget(self.stop_sink_btn)
+        sink_layout.addLayout(btn_layout)
+        self.uibc_check = QCheckBox("Enable User Input Back-Channel (UIBC)")
+        sink_layout.addWidget(self.uibc_check)
+        sink_group.setLayout(sink_layout)
+
+        # Status and instructions
+        status_group = QGroupBox("Status")
+        self.sink_status_label = QLabel("Not Running")
+        status_group.setLayout(QVBoxLayout())
+        status_group.layout().addWidget(self.sink_status_label)
+
+        instructions = QLabel(
+            "<b>Instructions:</b><br>"
+            "1. Stop NetworkManager/wpa_supplicant in Setup<br>"
+            "2. Select interface and start WiFi Daemon<br>"
+            "3. Start Sink Service<br>"
+            "4. Click 'Run Link' when detected<br>"
+            "5. Connect from source device"
+        )
+        instructions.setWordWrap(True)
+
+        # Tab layout assembly
+        layout.addWidget(iface_group)
+        layout.addWidget(wifi_group)
+        layout.addWidget(sink_group)
+        layout.addWidget(status_group)
+        layout.addWidget(instructions)
+        tab.setLayout(layout)
+        return tab
+
+    def create_source_tab(self):
+        """Create source control tab"""
+        tab = QWidget()
+        layout = QVBoxLayout()
+
+        # Interface selection
+        iface_group = QGroupBox("Network Interface")
+        iface_layout = QHBoxLayout()
+        self.source_iface_combo = QComboBox()
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(lambda: self.refresh_interfaces(self.source_iface_combo))
+        iface_layout.addWidget(QLabel("Select Interface:"))
+        iface_layout.addWidget(self.source_iface_combo)
+        iface_layout.addWidget(refresh_btn)
+        iface_group.setLayout(iface_layout)
+
+        # WiFi controls
+        wifi_group = QGroupBox("WiFi P2P Daemon")
+        wifi_layout = QHBoxLayout()
+        self.start_wifi_source_btn = QPushButton("Start WiFi Daemon")
+        self.start_wifi_source_btn.clicked.connect(lambda: self.start_wifi_daemon(True))
+        self.stop_wifi_source_btn = QPushButton("Stop WiFi Daemon")
+        self.stop_wifi_source_btn.clicked.connect(self.stop_wifi_daemon)
+        wifi_layout.addWidget(self.start_wifi_source_btn)
+        wifi_layout.addWidget(self.stop_wifi_source_btn)
+        wifi_group.setLayout(wifi_layout)
+
+        # P2P controls
+        p2p_group = QGroupBox("WiFi P2P Control")
+        p2p_layout = QVBoxLayout()
+        self.start_wifictl_btn = QPushButton("Start WiFi Control")
+        self.start_wifictl_btn.clicked.connect(self.start_wifi_control)
+        p2p_layout.addWidget(self.start_wifictl_btn)
+
+        scan_layout = QHBoxLayout()
+        self.p2p_scan_btn = QPushButton("Start P2P Scan")
+        self.p2p_scan_btn.clicked.connect(self.start_p2p_scan)
+        self.stop_p2p_scan_btn = QPushButton("Stop P2P Scan")
+        self.stop_p2p_scan_btn.clicked.connect(self.stop_p2p_scan)
+        scan_layout.addWidget(self.p2p_scan_btn)
+        scan_layout.addWidget(self.stop_p2p_scan_btn)
+        p2p_layout.addLayout(scan_layout)
+        p2p_group.setLayout(p2p_layout)
+
+        # Device discovery
+        dev_group = QGroupBox("Device Discovery")
+        dev_layout = QVBoxLayout()
+        self.list_devices_btn = QPushButton("List Devices")
+        self.list_devices_btn.clicked.connect(self.list_devices)
+        self.dev_list = QListWidget()
+        self.dev_list.itemClicked.connect(self.enable_connect_button)
+        dev_layout.addWidget(self.list_devices_btn)
+        dev_layout.addWidget(self.dev_list)
+
+        conn_layout = QHBoxLayout()
+        self.connect_btn = QPushButton("Connect")
+        self.connect_btn.clicked.connect(self.connect_to_device)
+        self.disconnect_btn = QPushButton("Disconnect")
+        self.disconnect_btn.clicked.connect(self.disconnect_device)
+        conn_layout.addWidget(self.connect_btn)
+        conn_layout.addWidget(self.disconnect_btn)
+        dev_layout.addLayout(conn_layout)
+        dev_group.setLayout(dev_layout)
+
+        # Mirroring controls
+        mirror_group = QGroupBox("Screen Mirroring")
+        mirror_layout = QVBoxLayout()
+
+        player_layout = QHBoxLayout()
+        player_layout.addWidget(QLabel("Player:"))
+        self.player_combo = QComboBox()
+        player_layout.addWidget(self.player_combo)
+        mirror_layout.addLayout(player_layout)
+
+        screen_layout = QHBoxLayout()
+        screen_layout.addWidget(QLabel("Screen:"))
+        self.screen_combo = QComboBox()
+        screen_layout.addWidget(self.screen_combo)
+        mirror_layout.addLayout(screen_layout)
+
+        self.player_options_group = QGroupBox("Player Options")
+        self.player_options_layout = QVBoxLayout()
+        self.player_options_group.setLayout(self.player_options_layout)
+        mirror_layout.addWidget(self.player_options_group)
+
+        btn_layout = QHBoxLayout()
+        self.start_mirror_btn = QPushButton("Start Mirroring")
+        self.start_mirror_btn.clicked.connect(self.start_screen_mirroring)
+        self.stop_mirror_btn = QPushButton("Stop Mirroring")
+        self.stop_mirror_btn.clicked.connect(self.stop_screen_mirroring)
+        btn_layout.addWidget(self.start_mirror_btn)
+        btn_layout.addWidget(self.stop_mirror_btn)
+        mirror_layout.addLayout(btn_layout)
+        mirror_group.setLayout(mirror_layout)
+
+        # Assembly
+        layout.addWidget(iface_group)
+        layout.addWidget(wifi_group)
+        layout.addWidget(p2p_group)
+        layout.addWidget(dev_group)
+        layout.addWidget(mirror_group)
+        tab.setLayout(layout)
+        return tab
+
+    def create_setup_tab(self):
+        """Create setup tab"""
+        tab = QWidget()
+        layout = QVBoxLayout()
+
+        # Service management
+        svc_group = QGroupBox("Network Services")
+        svc_layout = QGridLayout()
+
+        self.nm_stop_btn = QPushButton("Stop NetworkManager")
+        self.nm_start_btn = QPushButton("Start NetworkManager")
+        self.wpa_stop_btn = QPushButton("Stop wpa_supplicant")
+        self.wpa_start_btn = QPushButton("Start wpa_supplicant")
+
+        svc_layout.addWidget(self.nm_stop_btn, 0, 0)
+        svc_layout.addWidget(self.nm_start_btn, 0, 1)
+        svc_layout.addWidget(self.wpa_stop_btn, 1, 0)
+        svc_layout.addWidget(self.wpa_start_btn, 1, 1)
+
+        self.nm_status = QLabel("Unknown")
+        self.wpa_status = QLabel("Unknown")
+        svc_layout.addWidget(QLabel("NetworkManager:"), 0, 2)
+        svc_layout.addWidget(self.nm_status, 0, 3)
+        svc_layout.addWidget(QLabel("wpa_supplicant:"), 1, 2)
+        svc_layout.addWidget(self.wpa_status, 1, 3)
+
+        refresh_btn = QPushButton("Refresh Status")
+        refresh_btn.clicked.connect(self.check_services_status)
+        svc_layout.addWidget(refresh_btn, 2, 0, 1, 4)
+
+        self.nm_stop_btn.clicked.connect(lambda: self.manage_service("NetworkManager", False))
+        self.nm_start_btn.clicked.connect(lambda: self.manage_service("NetworkManager", True))
+        self.wpa_stop_btn.clicked.connect(lambda: self.manage_service("wpa_supplicant", False))
+        self.wpa_start_btn.clicked.connect(lambda: self.manage_service("wpa_supplicant", True))
+        svc_group.setLayout(svc_layout)
+
+        # Information section
+        info_group = QGroupBox("About MiracleCast")
+        info_layout = QVBoxLayout()
+        info_text = QLabel(
+            "MiracleCast implements WiFi Display (Miracast) specification\n\n"
+            "Source: Mirror screen to sink device\n"
+            "Sink: Display content from source device\n\n"
+            "Project page: <a href='https://github.com/albfan/miraclecast'>GitHub</a>"
+        )
+        info_text.setOpenExternalLinks(True)
+        info_layout.addWidget(info_text)
+        info_group.setLayout(info_layout)
+
+        layout.addWidget(svc_group)
+        layout.addWidget(info_group)
+        QTimer.singleShot(500, self.check_services_status)
+        tab.setLayout(layout)
+        return tab
+
+    # Core functionality methods
+    def check_dependencies(self):
+        """Verify required components are installed"""
+        required = ['miracle-wifid', 'miracle-sinkctl', 'miracle-wifictl']
+        self.mirror_commands = ['miracle-gst', 'miracle-omxplayer']
+
+        missing = []
+        for cmd in required + self.mirror_commands:
+            if not self.command_exists(cmd):
+                missing.append(cmd)
+
+        if missing:
+            self.show_error(f"Missing components:\n{', '.join(missing)}\nInstall via Setup instructions")
+        else:
+            self.player_combo.clear()
+            for cmd in [c for c in self.mirror_commands if self.command_exists(c)]:
+                self.player_combo.addItem(cmd)
+            self.setup_player_options()
+            self.refresh_interfaces()
+
+    def command_exists(self, cmd):
+        """Check if command exists in system PATH"""
+        return subprocess.call(['which', cmd],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL) == 0
+
+    def start_wifi_daemon(self, is_source=False):
+        """Start miracle-wifid service"""
+        iface = self.source_iface_combo.currentText() if is_source else self.iface_combo.currentText()
+        if not iface:
+            self.show_error("Select network interface first")
+            return
+
+        cmd = ['miracle-wifid', '-i', iface]
+        self.run_command(cmd, 'wifid')
+        self.log(f"Started WiFi daemon on {iface}")
+
+    def stop_wifi_daemon(self):
+        """Stop WiFi daemon process"""
+        if 'wifid' in self.processes:
+            self.processes['wifid'].terminate()
+            self.log("Stopped WiFi daemon")
+            
+    def stop_sink_service(self):
+        """Stop sink control service"""
+        if 'sink' in self.processes:
+            self.processes['sink'].terminate()
+            self.sink_status_label.setText("Not Running")
+            self.log("Stopped sink service")
+            if hasattr(self, 'link_timer') and self.link_timer.isActive():
+                self.link_timer.stop()
+            if hasattr(self, 'run_link_btn'):
+                self.run_link_btn.hide()
+                
+    def show_error(self, message):
+        """Display error message dialog"""
+        QMessageBox.critical(self, "Error", message)
+        
+    def log(self, message, error=False):
+        """Add message to console log"""
+        timestamp = time.strftime("[%H:%M:%S]")
+        prefix = "[ERROR] " if error else ""
+        self.console.append(f"{timestamp} {prefix}{message}")
+        if error:
+            print(f"ERROR: {message}", file=sys.stderr)
+            
+    def run_command(self, cmd, process_name):
+        """Run a command using QProcess"""
+        if process_name in self.processes:
+            # Stop existing process
+            self.processes[process_name].terminate()
+            self.processes[process_name].waitForFinished(1000)
+            
+        # Create new process
+        process = QProcess(self)
+        self.processes[process_name] = process
+        
+        # Connect signals
+        process.readyReadStandardOutput.connect(
+            lambda: self.process_output(process, process_name, False))
+        process.readyReadStandardError.connect(
+            lambda: self.process_output(process, process_name, True))
+        
+        # Start process
+        self.log(f"Running: {' '.join(cmd)}")
+        process.start(cmd[0], cmd[1:])
+        
+    def process_output(self, process, name, is_error):
+        """Handle process output"""
+        if is_error:
+            output = process.readAllStandardError().data().decode('utf-8', errors='replace')
+            self.log(f"[{name}] {output}", error=True)
+        else:
+            output = process.readAllStandardOutput().data().decode('utf-8', errors='replace')
+            self.log(f"[{name}] {output}")
+            
+    def manage_service(self, service_name, start=True):
+        """Manage system services"""
+        action = "start" if start else "stop"
+        try:
+            result = subprocess.run(['sudo', 'systemctl', action, service_name], 
+                                   capture_output=True, text=True)
+            if result.returncode == 0:
+                self.log(f"{service_name} {action}ed successfully")
+                self.check_services_status()
+            else:
+                error_msg = result.stderr.strip() or f"Failed to {action} {service_name}"
+                self.show_error(error_msg)
+                self.log(error_msg, error=True)
+        except Exception as e:
+            self.show_error(f"Error: {str(e)}")
+            self.log(str(e), error=True)
+            
+    def start_wifi_control(self):
+        """Start the WiFi control interface"""
+        cmd = ['miracle-wifictl']
+        self.run_command(cmd, 'wifictl')
+        self.log("Started WiFi control")
+        
+    def start_p2p_scan(self):
+        """Start P2P scanning for devices"""
+        if 'wifictl' in self.processes and self.processes['wifictl'].state() == QProcess.Running:
+            self.processes['wifictl'].write(b"p2p-scan\n")
+            self.log("Started P2P scan")
+        else:
+            self.show_error("WiFi Control not running. Start it first.")
+            
+    def stop_p2p_scan(self):
+        """Stop P2P scanning"""
+        if 'wifictl' in self.processes and self.processes['wifictl'].state() == QProcess.Running:
+            self.processes['wifictl'].write(b"p2p-stop-scan\n")
+            self.log("Stopped P2P scan")
+        else:
+            self.show_error("WiFi Control not running.")
+            
+    def list_devices(self):
+        """List discovered P2P devices"""
+        if 'wifictl' in self.processes and self.processes['wifictl'].state() == QProcess.Running:
+            self.processes['wifictl'].write(b"list\n")
+            self.log("Listing P2P devices")
+            # The output will be processed in process_output
+            # Here we should parse and update the device list
+            # For now, this is a placeholder
+            # TODO: Add proper device list parsing from wifictl output
+        else:
+            self.show_error("WiFi Control not running. Start it first.")
+            
+    def enable_connect_button(self, item):
+        """Enable connect button when a device is selected"""
+        self.connect_btn.setEnabled(True)
+        
+    def connect_to_device(self):
+        """Connect to selected P2P device"""
+        if not self.dev_list.currentItem():
+            self.show_error("Select a device first")
+            return
+            
+        # Get device MAC from item text (format: "MAC Description")
+        item_text = self.dev_list.currentItem().text()
+        mac_match = re.search(r"([0-9A-F]{2}(?::[0-9A-F]{2}){5})", item_text, re.IGNORECASE)
+        if not mac_match:
+            self.show_error("Invalid device selection")
+            return
+            
+        mac = mac_match.group(1)
+        if 'wifictl' in self.processes and self.processes['wifictl'].state() == QProcess.Running:
+            self.processes['wifictl'].write(f"connect {mac}\n".encode())
+            self.log(f"Connecting to device: {mac}")
+        else:
+            self.show_error("WiFi Control not running. Start it first.")
+            
+    def disconnect_device(self):
+        """Disconnect from P2P device"""
+        if 'wifictl' in self.processes and self.processes['wifictl'].state() == QProcess.Running:
+            self.processes['wifictl'].write(b"disconnect\n")
+            self.log("Disconnecting from device")
+        else:
+            self.show_error("WiFi Control not running.")
+            
+    def start_screen_mirroring(self):
+        """Start screen mirroring using selected player"""
+        player = self.player_combo.currentText()
+        screen = self.screen_combo.currentText()
+        
+        if not player or not screen:
+            self.show_error("Select player and screen first")
+            return
+            
+        cmd = [player]
+        
+        # Add options based on selected player
+        if player == 'miracle-gst' and hasattr(self, 'gst_fullscreen'):
+            if self.gst_fullscreen.isChecked():
+                cmd.append('--fullscreen')
+                
+        elif player == 'miracle-omxplayer' and hasattr(self, 'omx_audio'):
+            if self.omx_audio.isChecked():
+                cmd.append('--audio')
+                
+        # Add screen selection if it's not the default
+        if screen != "default":
+            cmd.extend(['--display', screen])
+            
+        self.run_command(cmd, 'player')
+        self.log(f"Started screen mirroring with {player}")
+        
+    def stop_screen_mirroring(self):
+        """Stop screen mirroring"""
+        if 'player' in self.processes:
+            self.processes['player'].terminate()
+            self.log("Stopped screen mirroring")
+
+
+# Main entry point
+if __name__ == "__main__":
+    # Check if running as root
+    if os.geteuid() != 0:
+        print("MiracleCast GUI requires root privileges to access network interfaces.")
+        print("Please run with sudo or pkexec.")
+        sys.exit(1)
+        
+    app = QApplication(sys.argv)
+    window = MiracleCastGUI()
+    window.show()
+    sys.exit(app.exec_())
+            self.show_error("Select network interface first")
+            return
+
+        cmd = ['miracle-sinkctl']
+        if self.uibc_check.isChecked():
+            cmd.append('--uibc')
+
+        self.run_command(cmd, 'sink')
+        self.sink_status_label.setText("Running")
+        self.link_timer = QTimer()
+        self.link_timer.timeout.connect(self.check_for_link)
+        self.link_timer.start(1000)
+
+    def check_for_link(self):
+        """Monitor console for new link events"""
+        console_text = self.console.toPlainText()
+        if "[ADD]  Link:" in console_text:
+            self.link_timer.stop()
+            self.sink_status_label.setText("Link detected")
+            match = re.search(r"\[ADD\]\s+Link:\s+(\d+)", console_text)
+            if match:
+                link_num = match.group(1)
+                if not hasattr(self, 'run_link_btn'):
+                    self.run_link_btn = QPushButton(f"Run Link {link_num}")
+                    self.run_link_btn.clicked.connect(lambda: self.run_link(link_num))
+                    self.sink_tab.layout().insertWidget(3, self.run_link_btn)
+                else:
+                    self.run_link_btn.setText(f"Run Link {link_num}")
+                    self.run_link_btn.show()
+
+    def run_link(self, link_num):
+        """Activate the discovered link"""
+        if 'sink' in self.processes and self.processes['sink'].state() == QProcess.Running:
+            self.processes['sink'].write(f"run {link_num}\n".encode())
+            self.sink_status_label.setText(f"Link {link_num} active")
+
+    def refresh_interfaces(self, combo=None):
+        """Refresh available network interfaces"""
+        try:
+            result = subprocess.run(['ip', 'link', 'show'], capture_output=True, text=True)
+            interfaces = re.findall(r'\d+: ([^:]+):', result.stdout)
+            valid_ifaces = [iface for iface in interfaces
+                          if not iface.startswith(('lo', 'virbr', 'docker'))]
+
+            targets = [self.iface_combo, self.source_iface_combo] if combo is None else [combo]
+            for widget in targets:
+                widget.clear()
+                widget.addItems(valid_ifaces)
+        except Exception as e:
+            self.log(f"Interface refresh failed: {str(e)}", error=True)
+
+    def check_services_status(self):
+        """Update service status indicators"""
+        try:
+            nm_active = subprocess.call(['systemctl', 'is-active', 'NetworkManager']) == 0
+            wpa_active = subprocess.call(['systemctl', 'is-active', 'wpa_supplicant']) == 0
+            self.nm_status.setText("Running" if nm_active else "Stopped")
+            self.wpa_status.setText("Running" if wpa_active else "Stopped")
+        except Exception as e:
+            self.log(f"Service status check failed: {str(e)}", error=True)
+
+    def setup_player_options(self):
+        """Configure options for selected media player"""
+        # Clear existing options
+        while self.player_options_layout.count():
+            item = self.player_options_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        player = self.player_combo.currentText()
+        if player == 'miracle-gst':
+            # GStreamer options
+            self.player_options_layout.addWidget(QLabel("GStreamer Options:"))
+            self.gst_fullscreen = QCheckBox("Fullscreen")
+            self.gst_fullscreen.setChecked(True)
+            self.player_options_layout.addWidget(self.gst_fullscreen)
+        elif player == 'miracle-omxplayer':
+            # OMXPlayer options (Raspberry Pi)
+            self.player_options_layout.addWidget(QLabel("OMXPlayer Options:"))
+            self.omx_audio = QCheckBox("Enable Audio")
+            self.omx_audio.setChecked(True)
+            self.player_options_layout.addWidget(self.omx_audio)
+            
+        # Get available displays for screen mirroring
+        try:
+            self.screen_combo.clear()
+            if sys.platform == 'linux':
+                # Use xrandr to get monitors on Linux
+                result = subprocess.run(['xrandr', '--listmonitors'], 
+                                       capture_output=True, text=True)
+                monitors = re.findall(r'\d+: \+\*?([^ ]+)', result.stdout)
+                self.screen_combo.addItems(monitors)
+            else:
+                # Default for other platforms
+                self.screen_combo.addItem("default")
+        except Exception as e:
+            self.log(f"Failed to get displays: {str(e)}", error=True)
+            self.screen_combo.addItem("default")

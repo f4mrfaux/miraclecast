@@ -5,6 +5,8 @@ miracle_wifictl_SOURCES = \
 	ctl.h \
 	ctl-cli.c \
 	ctl-wifi.c \
+	sourcemode.h \
+	sourcemode.c \
 	wifictl.c
 miracle_wifictl_CPPFLAGS = \
 	$(AM_CPPFLAGS) \

@@ -1,0 +1,150 @@
+#!/bin/bash
+# Improved version of miracle-gst with fixes for common issues including green screen
+
+function help {
+   local scriptname="$(basename $0)"
+   cat >&2 <<EOF
+
+$scriptname [options]
+
+play rtp stream with improved compatibility
+
+Options:
+   -r                   Resolution
+   -s <Width>x<height>  Scale
+   -d <level>           Log level for gst
+   -p <port>            Port for stream
+   -a                   Enables audio
+   -c                   Fix color space issues (for green screen)
+   -f                   Force fallback decoder pipeline
+   -h                   Show this help
+
+Examples:
+
+ # play stream on port 7236
+ $ $scriptname -p 7236
+ # play stream with resolution 800x600
+ $ $scriptname -s 800x600
+ # play stream with audio
+ $ $scriptname -a
+ # play stream with debug level 3
+ $ $scriptname -d 3
+ # fix green screen issues
+ $ $scriptname -c
+ # force fallback decoder for problem devices
+ $ $scriptname -f
+
+EOF
+}
+
+DEBUG='0'
+AUDIO='0'
+SCALE='0'
+FIX_COLOR='0'
+FALLBACK='0'
+PORT='7236'
+
+while getopts "r:d:as:p:cfh" optname
+  do
+    case "$optname" in
+      "h")
+        help
+        exit 0
+        ;;
+      "d")
+        DEBUG=`echo ${OPTARG} | tr -d ' '`
+        ;;
+      "r")
+        RESOLUTION=`echo ${OPTARG} | tr -d ' '`
+        ;;
+      "a")
+        AUDIO='1'
+        ;;
+      "p")
+        PORT=`echo ${OPTARG} | tr -d ' '`
+        ;;
+      "c")
+        FIX_COLOR='1'
+        ;;
+      "f")
+        FALLBACK='1'
+        ;;
+      "s")
+        SCALE='1'
+        WIDTH=`echo ${OPTARG} | tr -d ' ' | cut -dx -f 1`
+        HEIGHT=`echo ${OPTARG} | tr -d ' ' | cut -dx -f 2`
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        ;;
+      *)
+        echo "Unknown parameter $OPTARG"
+        help
+        exit 1
+        ;;
+    esac
+  done
+
+# Apply color space fix for green screen issues
+if [ $FIX_COLOR == '1' ]; then
+  export GST_VIDEO_CONVERT_USE_ARGB=1
+  echo "Applied color space fix (GST_VIDEO_CONVERT_USE_ARGB=1)"
+fi
+
+# Determine which GStreamer command to use (standard or fallback)
+if [ $FALLBACK == '1' ]; then
+  echo "Using fallback decoder pipeline"
+  
+  RUN="/usr/bin/gst-launch-1.0 -v "
+  if [ $DEBUG != '0' ]; then
+    RUN+="--gst-debug=${DEBUG} "
+  fi
+  
+  # Fallback pipeline with enhanced compatibility
+  RUN+="udpsrc port=$PORT caps=\"application/x-rtp, media=video\" ! rtpjitterbuffer latency=300 ! rtpmp2tdepay ! tsdemux "
+  
+  if [ $AUDIO == '1' ]; then
+    RUN+="name=demuxer demuxer. "
+  fi
+  
+  # Use more compatible decoders and add colorspace corrections
+  RUN+="! queue max-size-buffers=0 max-size-time=0 ! h264parse ! decodebin ! videoconvert ! videorate ! "
+  
+  if [ $SCALE == '1' ]; then
+    RUN+="videoscale method=0 ! video/x-raw,width=${WIDTH},height=${HEIGHT} ! "
+  fi
+  
+  RUN+="autovideosink sync=false "
+  
+  if [ $AUDIO == '1' ]; then
+    RUN+="demuxer. ! queue max-size-buffers=0 max-size-time=0 ! aacparse ! decodebin ! audioconvert ! audioresample ! autoaudiosink "
+  fi
+
+else
+  # Standard pipeline with enhancements
+  RUN="/usr/bin/gst-launch-1.0 -v "
+  if [ $DEBUG != '0' ]; then
+    RUN+="--gst-debug=${DEBUG} "
+  fi
+  
+  RUN+="udpsrc port=$PORT caps=\"application/x-rtp, media=video\" ! rtpjitterbuffer latency=200 ! rtpmp2tdepay ! tsdemux "
+  
+  if [ $AUDIO == '1' ]; then
+    RUN+="name=demuxer demuxer. "
+  fi
+  
+  RUN+="! queue max-size-buffers=0 max-size-time=0 ! h264parse ! avdec_h264 ! videoconvert dither=0 ! "
+  
+  if [ $SCALE == '1' ]; then
+    RUN+="videoscale method=1 ! video/x-raw,width=${WIDTH},height=${HEIGHT} ! "
+  fi
+  
+  RUN+="autovideosink "
+  
+  if [ $AUDIO == '1' ]; then
+    RUN+="demuxer. ! queue max-size-buffers=0 max-size-time=0 ! aacparse ! avdec_aac ! audioconvert ! audioresample ! autoaudiosink "
+  fi
+fi
+
+echo "Running: $RUN"
+exec ${RUN}
